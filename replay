@@ -1,0 +1,1 @@
+python second_script.py --logfile /vol/teaching/drive_weather/logs/FollowLeadingVehicle_1.log --weather_parameters weather.csv --dir output --sensors test.cam
