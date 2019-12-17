@@ -7,6 +7,7 @@ import math
 import random
 import time
 import logging
+import queue
 
 try: 
     sys.path.append(glob.glob('**/carla-*%d.%d-%s.egg' % ( 
@@ -29,9 +30,10 @@ class iSensor:
         self.y = 0
         self.z = 0
         self.yaw = 0
+	self.imageQueue = queue.Queue()
 
-    def set_meta_params(self, path, name):
-        self.dirpath = "%s/%s" % (path,name)
+    def set_meta_params(self, dirname, path, name):
+        self.dirpath = "%s/%s/%s" % (dirname, path,name)
         
     def set_params(self, x, y, z, yaw):
         self.x = x
@@ -48,9 +50,14 @@ class iSensor:
         camera_bp = blueprint.find('sensor.camera.rgb') #default set to rgb
         self.sensor = world.spawn_actor(camera_bp, camera_transform, attach_to=car)
 
-    def listen(self, dirname):
-	print("Saving to: %s/%s" % (dirname, self.dirpath))
-        self.sensor.listen(lambda image: image.save_to_disk('%s/%s/%06d.png' % (dirname, self.dirpath,image.frame_number)))
+    def listen(self):
+	print("Saving to: %s" % (self.dirpath))
+        #self.sensor.listen(lambda image: image.save_to_disk('%s/%s/%06d.png' % (dirname, self.dirpath,image.frame_number)))
+	self.sensor.listen(self.imageQueue.put)
+
+    def saveImage(self,frameNumber):
+	image = self.imageQueue.get()
+	image.save_to_disk('%s/%06d.png' % (self.dirpath, frameNumber))
 
     def destroy(self):
 	self.sensor.destroy()
@@ -80,11 +87,11 @@ def sensor_handler(filename, car, blueprint, world, dirname, dirprefix):
             else:
                 new_sensor = iSensor()
                 new_sensor.set_params(float(args[1]), float(args[2]), float(args[3]), int(args[4]))
-                new_sensor.set_meta_params(dirprefix, args[0])
+                new_sensor.set_meta_params(dirname, dirprefix, args[0])
 		new_sensor.attach_to_car(car, blueprint, world)
                 iSensor_list.append(new_sensor)
     for sensor in iSensor_list:
-        sensor.listen(dirname)
+        sensor.listen()
     return iSensor_list
 
 ###########################################################
@@ -137,12 +144,13 @@ def weatherHandler(line, lineCounter):
 #
 ###########################################################
 
-def getLogTime(logFile, client):
+def getLogFrames(logFile, client):
     logFileInfo = client.show_recorder_file_info(logFile, False).split("\n")
     logFileLength = len(logFileInfo)
     DurString = logFileInfo[logFileLength-2].split(" ")
     logTime = float(DurString[1])
-    return logTime
+    logFrames = int(logTime * 20)
+    return logFrames
 
 def getLogName(logFile):
     logFileName = logFile.split(".")[0]
@@ -234,9 +242,15 @@ def main():
 
     #Get recorder file info.
     logFileName = getLogName(args.logfile)
-    logTime = getLogTime(args.logfile, client)
+    nFrames = getLogFrames(args.logfile, client)
     world = client.get_world()
     blueprint_library = world.get_blueprint_library()
+
+    #Set the world to synchronous mode to avoid frame dropping and set FPS to 20.
+    settings = world.get_settings()
+    settings.synchronous_mode = False
+    settings.fixed_delta_seconds = 0.05
+    world.apply_settings(settings)
 
     if os.path.isfile(args.weather_parameters) == False:
 	print(".csv Weather file specified does not exist. Please check the path.")
@@ -255,23 +269,35 @@ def main():
         world = client.get_world()
         world.wait_for_tick()
         world = client.get_world()
-        #LIMIT FRAMERATE TO 20FPS
-        settings = world.get_settings()
-        settings.fixed_delta_seconds = 0.05
-        world.apply_settings(settings)
+	#Wait 40 frames for vehicles to spawn.
+	for i in range(0, 40):
+		world.wait_for_tick()
+	#Make world synchronous
+	settings = world.get_settings()
+    	settings.synchronous_mode = True
+	settings.fixed_delta_seconds = 0.05
+   	world.apply_settings(settings)
         world.set_weather(weather)
         #Find my vehicle (audi tt) and attach all specified sensors.
 	egoVehicle = world.get_actors().filter('vehicle.audi.tt')[0]
 	sensorList = sensor_handler(args.sensors, egoVehicle, blueprint_library, world, args.dir, dirprefix)
         world.set_weather(weather)
         #Wait for the running log to finish
-	time.sleep(logTime)
+	for i in range (0, nFrames - 86):
+	    client.get_world().tick()
+	    for sensor in sensorList:
+		sensor.saveImage(i)
+		
         #Destroy the camera - only way to stop it listening (and send to new directory).
-        for camera in sensorList:
-            camera.destroy()
+        settings = world.get_settings()
+        settings.synchronous_mode = False
+	settings.fixed_delta_seconds = 0.05
+        world.apply_settings(settings)
+        for sensor in sensorList:
+            sensor.destroy()
 
     #Post processing renames all image files to begin at 000000.png and matches image number.
-    postProcess(args.dir, logFileName)
+    # postProcess(args.dir, logFileName)
 
 if __name__ == '__main__':
 
@@ -281,4 +307,3 @@ if __name__ == '__main__':
         pass
     finally:
         print('\nDone!')
-
