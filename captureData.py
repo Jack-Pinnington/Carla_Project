@@ -8,6 +8,8 @@ import random
 import time
 import logging
 import queue
+import datetime
+import threading
 
 try: 
     sys.path.append(glob.glob('**/carla-*%d.%d-%s.egg' % ( 
@@ -51,7 +53,7 @@ class iSensor:
         self.sensor = world.spawn_actor(camera_bp, camera_transform, attach_to=car)
 
     def listen(self):
-	print("Saving to: %s" % (self.dirpath))
+	#print("Saving to: %s" % (self.dirpath))
         #self.sensor.listen(lambda image: image.save_to_disk('%s/%s/%06d.png' % (dirname, self.dirpath,image.frame_number)))
 	self.sensor.listen(self.imageQueue.put)
 
@@ -69,7 +71,7 @@ class iSensor:
 #
 ###########################################################
 
-def sensor_handler(filename, car, blueprint, world, dirname, dirprefix):
+def sensorCreator(filename, car, blueprint, world, dirname, dirprefix):
     if os.path.isfile(filename) == False:
 	print(".cam file specified does not exist. Please check the path.")
 	return
@@ -93,6 +95,40 @@ def sensor_handler(filename, car, blueprint, world, dirname, dirprefix):
     for sensor in iSensor_list:
         sensor.listen()
     return iSensor_list
+
+###########################################################
+#
+# IMAGE SAVER - saves images using multi-threading for 
+# all sensors.
+#
+###########################################################
+
+def imageSaver(sensorList, frameNumber, maxThreads):
+    numSensors = len(sensorList)
+    numFullThreads = numSensors / maxThreads
+    threadRemainder = numSensors % maxThreads
+    #Start full threads
+    sensorCounter = 0
+    if numFullThreads > 0:
+	for j in range(0, numFullThreads):
+	    for i in range(0, maxThreads):
+	        threads = list()
+	        thread = threading.Thread(target = sensorList[sensorCounter].saveImage, args=(frameNumber,))
+	        threads.append(thread)
+	        sensorCounter = sensorCounter + 1
+	        thread.start()
+	    for thread in threads:
+		thread.join()
+    if threadRemainder > 0:
+	for i in range(0, threadRemainder):
+	    threads = list()
+	    thread = threading.Thread(target = sensorList[sensorCounter].saveImage, args=(frameNumber,))
+	    threads.append(thread)
+	    sensorCounter = sensorCounter + 1
+	    thread.start()
+	for thread in threads:
+            thread.join()
+    return
 
 ###########################################################
 #
@@ -161,42 +197,6 @@ def getLogName(logFile):
 
 ###########################################################
 #
-# Post-processing - match all file names.
-#
-###########################################################
-
-def postProcess(directory, logFileName):
-    path = "%s/%s" % (directory, logFileName)
-    imageLengthList = []
-    folders = ([name for name in os.listdir(path)])
-    #Get the number of images in each folder.
-    for folder in folders:
-        sensors = os.listdir(os.path.join(path, folder))
-	for sensor in sensors:
-	    dirName = "%s/%s" % (folder, sensor)
-	    nImages = len(os.listdir(os.path.join(path, dirName)))
-            imageLengthList.append(nImages)
-    #Get the minimum
-    minImages = min(imageLengthList)
-    for folder in folders:
-	sensors = os.listdir(os.path.join(path, folder))
-	for sensor in sensors:
-	    dirName = "%s/%s" % (folder, sensor)
-	    imageList = os.listdir(os.path.join(path, dirName))
-	    imageList.sort()
-	    imageCounter = 0
-	    for image in imageList:
-		newFileName = "%06d.png" % imageCounter
-		newFilePath = os.path.join(path, dirName, newFileName)
-		imagePath = os.path.join(path, dirName, image)
-		if imageCounter < minImages:
-		    os.rename(imagePath, newFilePath)
-		else:
-		    os.remove(imagePath)
-		imageCounter = imageCounter + 1
-    
-###########################################################
-#
 # MAIN - passes arguments
 #
 ###########################################################
@@ -233,6 +233,10 @@ def main():
         '-l', '--logfile',
         metavar='F',
         help='Logfile containing the scenario to be replayed')
+    argparser.add_argument(
+	'-t', '--max_threads',
+	default=1,
+	help='Maximum number of threads that can be used to render images (default: 1)')
     args = argparser.parse_args()
 
     #Create the Carla client.
@@ -251,6 +255,8 @@ def main():
     settings.synchronous_mode = False
     settings.fixed_delta_seconds = 0.05
     world.apply_settings(settings)
+
+    print("Begin processing at %s" % datetime.datetime.now())
 
     if os.path.isfile(args.weather_parameters) == False:
 	print(".csv Weather file specified does not exist. Please check the path.")
@@ -277,18 +283,28 @@ def main():
     	settings.synchronous_mode = True
 	settings.fixed_delta_seconds = 0.05
    	world.apply_settings(settings)
+
+        #Find the hero vehicle and attach the sensors.
+	egoVehicle = None
+	actorList = world.get_actors().filter('vehicle.*')
+	for actor in actorList:
+	    if(actor.attributes.get('role_name') == 'hero'):
+		egoVehicle = actor
+		break
+	if egoVehicle == None:
+	    print("Error: Could not find the ego vehicle!")
+	    return
+
+	sensorList = sensorCreator(args.sensors, egoVehicle, blueprint_library, world, args.dir, dirprefix)
         world.set_weather(weather)
-        #Find my vehicle (audi tt) and attach all specified sensors.
-	egoVehicle = world.get_actors().filter('vehicle.audi.tt')[0]
-	sensorList = sensor_handler(args.sensors, egoVehicle, blueprint_library, world, args.dir, dirprefix)
-        world.set_weather(weather)
+	
         #Wait for the running log to finish
-	for i in range (0, nFrames - 86):
+	for frameNumber in range (0, nFrames - 86): #-86 is a fudge factor for the recording to end.
 	    client.get_world().tick()
-	    for sensor in sensorList:
-		sensor.saveImage(i)
-		
-        #Destroy the camera - only way to stop it listening (and send to new directory).
+	    imageSaver(sensorList, frameNumber, int(args.max_threads))
+
+        #Destroy the cameras - required since the car they are attached to is deleted on replay.
+	#World should be asynchronous again - speed increase since no more data is collected.
         settings = world.get_settings()
         settings.synchronous_mode = False
 	settings.fixed_delta_seconds = 0.05
@@ -296,8 +312,7 @@ def main():
         for sensor in sensorList:
             sensor.destroy()
 
-    #Post processing renames all image files to begin at 000000.png and matches image number.
-    # postProcess(args.dir, logFileName)
+    print("End processing at %s" % datetime.datetime.now())
 
 if __name__ == '__main__':
 
