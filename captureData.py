@@ -10,6 +10,7 @@ import logging
 import queue
 import datetime
 import threading
+import scipy.misc
 
 try: 
     sys.path.append(glob.glob('**/carla-*%d.%d-%s.egg' % ( 
@@ -19,12 +20,66 @@ try:
 except IndexError: 
     pass
 
+try:
+    import numpy
+    from numpy.matlib import repmat
+except ImportError:
+    raise RuntimeError('cannot import numpy, make sure numpy package is installed')
+
+###########################################################
+#
+# image_converter - convert semantic to rgb
+#
+###########################################################
+
+def semantic_seg_image_converter(image):
+    """
+    Convert an image containing CARLA semantic segmentation labels to
+    Cityscapes palette.
+    """
+    classes = {
+        0: [0, 0, 0],         # None
+        1: [70, 70, 70],      # Buildings
+        2: [190, 153, 153],   # Fences
+        3: [72, 0, 90],       # Other
+        4: [220, 20, 60],     # Pedestrians
+        5: [153, 153, 153],   # Poles
+        6: [157, 234, 50],    # RoadLines
+        7: [128, 64, 128],    # Roads
+        8: [244, 35, 232],    # Sidewalks
+        9: [107, 142, 35],    # Vegetation
+        10: [0, 0, 255],      # Vehicles
+        11: [102, 102, 156],  # Walls
+        12: [220, 220, 0]     # TrafficSigns
+    }
+    array = labels_to_array(image)
+    result = numpy.zeros((array.shape[0], array.shape[1], 3))
+    for key, value in classes.items():
+        result[numpy.where(array == key)] = value
+    return result
+
+
+def labels_to_array(image):
+    """
+    Convert an image containing CARLA semantic segmentation labels to a 2D array
+    containing the label of each pixel.
+    """
+    return to_bgra_array(image)[:, :, 2]
+
+
+def to_bgra_array(image):
+    """Convert a CARLA raw image to a BGRA numpy array."""
+    #if not isinstance(image, sensor.Image):
+    #    raise ValueError("Argument must be a carla.sensor.Image")
+    array = numpy.frombuffer(image.raw_data, dtype=numpy.dtype("uint8"))
+    array = numpy.reshape(array, (image.height, image.width, 4))
+    return array
+
 ###########################################################
 #
 # iSensor Class definitions
 #
 ###########################################################
-
 
 class iSensor:
     def __init__(self):
@@ -33,9 +88,14 @@ class iSensor:
         self.z = 0
         self.yaw = 0
 	self.imageQueue = queue.Queue()
+	self._type = 'rgb'
 
     def set_meta_params(self, dirname, path, name):
-        self.dirpath = "%s/%s/%s" % (dirname, path,name)
+        self.dirpath = '%s/%s/%s' % (dirname, path,name)
+	cwd = os.getcwd()
+	path = os.path.join(cwd, self.dirpath)
+        if not(os.path.exists(path)):
+	    os.makedirs(path)
         
     def set_params(self, x, y, z, yaw):
         self.x = x
@@ -47,9 +107,14 @@ class iSensor:
         return_list = [self.x, self.y, self.z, self.yaw]
         return return_list
 
-    def attach_to_car(self, car, blueprint, world):
+    def attach_to_car(self, car, blueprint, world, rgb):
         camera_transform = carla.Transform(carla.Location(x=self.x, y=self.y, z=self.z), carla.Rotation(yaw=self.yaw))
-        camera_bp = blueprint.find('sensor.camera.rgb') #default set to rgb
+	if rgb == True:
+        	camera_bp = blueprint.find('sensor.camera.rgb') #default set to rgb
+		self._type = 'rgb'
+	else:
+		camera_bp = blueprint.find('sensor.camera.semantic_segmentation')
+		self._type = 'seg'
         self.sensor = world.spawn_actor(camera_bp, camera_transform, attach_to=car)
 
     def listen(self):
@@ -58,8 +123,13 @@ class iSensor:
 	self.sensor.listen(self.imageQueue.put)
 
     def saveImage(self,frameNumber):
-	image = self.imageQueue.get()
-	image.save_to_disk('%s/%06d.png' % (self.dirpath, frameNumber))
+	if self._type == 'rgb':
+	    image = self.imageQueue.get()
+	    image.save_to_disk('%s/%06d.png' % (self.dirpath, frameNumber))
+	elif self._type == 'seg':
+	    image = self.imageQueue.get()
+            convertedImage = semantic_seg_image_converter(image)
+	    scipy.misc.toimage(convertedImage).save('%s/%06d.png' % (self.dirpath, frameNumber))
 
     def destroy(self):
 	self.sensor.destroy()
@@ -71,7 +141,7 @@ class iSensor:
 #
 ###########################################################
 
-def sensorCreator(filename, car, blueprint, world, dirname, dirprefix):
+def sensorCreator(filename, car, blueprint, world, dirname, dirprefix, rgb):
     if os.path.isfile(filename) == False:
 	print(".cam file specified does not exist. Please check the path.")
 	return
@@ -90,7 +160,7 @@ def sensorCreator(filename, car, blueprint, world, dirname, dirprefix):
                 new_sensor = iSensor()
                 new_sensor.set_params(float(args[1]), float(args[2]), float(args[3]), int(args[4]))
                 new_sensor.set_meta_params(dirname, dirprefix, args[0])
-		new_sensor.attach_to_car(car, blueprint, world)
+		new_sensor.attach_to_car(car, blueprint, world, rgb)
                 iSensor_list.append(new_sensor)
     for sensor in iSensor_list:
         sensor.listen()
@@ -262,7 +332,58 @@ def main():
 	print(".csv Weather file specified does not exist. Please check the path.")
 	return
     weatherFile = open(args.weather_parameters)
-    #For each weather condition specified, run the log file.
+    ######################################
+    #
+    # SEMANTIC SEGMENTATION
+    #
+    ######################################
+    dirprefix = '%s/semantic' % logFileName
+    client.replay_file(args.logfile, 0, 0, 0)
+#World updates to the log file on the next tick - required to wait to read actor pool.
+    world = client.get_world()
+    world.wait_for_tick()
+    world = client.get_world()
+    #Make world synchronous
+    settings = world.get_settings()
+    settings.synchronous_mode = True
+    settings.fixed_delta_seconds = 0.05
+    world.apply_settings(settings)
+
+    #Wait 65 frames for vehicles to spawn.
+    for i in range(0, 40):
+	client.get_world().tick()
+
+    #Find the hero vehicle and attach the sensors.
+    egoVehicle = None
+    actorList = world.get_actors().filter('vehicle.*')
+    for actor in actorList:
+	if(actor.attributes.get('role_name') == 'hero'):
+            egoVehicle = actor
+	    break
+	if egoVehicle == None:
+	    print("Error: Could not find the ego vehicle!")
+	    return
+    sensorList = sensorCreator(args.sensors, egoVehicle, blueprint_library, world, args.dir, dirprefix, False)
+	
+    #Wait for the running log to finish
+    for frameNumber in range (0, nFrames - 86): #-86 is a fudge factor for the recording to end.
+	client.get_world().tick()
+	imageSaver(sensorList, frameNumber, int(args.max_threads))
+
+    #Destroy the cameras - required since the car they are attached to is deleted on replay.
+    #World should be asynchronous again - speed increase since no more data is collected.
+    settings = world.get_settings()
+    settings.synchronous_mode = False
+    settings.fixed_delta_seconds = 0.05
+    world.apply_settings(settings)
+    for sensor in sensorList:
+        sensor.destroy()
+
+    ######################################
+    #
+    # WEATHER CONDITIONS
+    #
+    ######################################
     for line in weatherFile:
         #Read one set of weather conditions from the .csv input file.
         weather = weatherHandler(line, 0)
@@ -275,14 +396,15 @@ def main():
         world = client.get_world()
         world.wait_for_tick()
         world = client.get_world()
-	#Wait 40 frames for vehicles to spawn.
-	for i in range(0, 40):
-		world.wait_for_tick()
 	#Make world synchronous
 	settings = world.get_settings()
     	settings.synchronous_mode = True
 	settings.fixed_delta_seconds = 0.05
    	world.apply_settings(settings)
+
+	#Wait 40 frames for vehicles to spawn.
+        for i in range(0, 40):
+	    client.get_world().tick()
 
         #Find the hero vehicle and attach the sensors.
 	egoVehicle = None
@@ -295,7 +417,7 @@ def main():
 	    print("Error: Could not find the ego vehicle!")
 	    return
 
-	sensorList = sensorCreator(args.sensors, egoVehicle, blueprint_library, world, args.dir, dirprefix)
+	sensorList = sensorCreator(args.sensors, egoVehicle, blueprint_library, world, args.dir, dirprefix, True)
         world.set_weather(weather)
 	
         #Wait for the running log to finish
