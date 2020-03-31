@@ -10,7 +10,6 @@ import logging
 import queue
 import datetime
 import threading
-import scipy.misc
 
 try: 
     sys.path.append(glob.glob('**/carla-*%d.%d-%s.egg' % ( 
@@ -20,64 +19,10 @@ try:
 except IndexError: 
     pass
 
-try:
-    import numpy
-    from numpy.matlib import repmat
-except ImportError:
-    raise RuntimeError('cannot import numpy, make sure numpy package is installed')
-
 ###########################################################
 #
-# image_converter - convert semantic to rgb
-#
-###########################################################
-
-def semantic_seg_image_converter(image):
-    """
-    Convert an image containing CARLA semantic segmentation labels to
-    Cityscapes palette.
-    """
-    classes = {
-        0: [0, 0, 0],         # None
-        1: [70, 70, 70],      # Buildings
-        2: [190, 153, 153],   # Fences
-        3: [72, 0, 90],       # Other
-        4: [220, 20, 60],     # Pedestrians
-        5: [153, 153, 153],   # Poles
-        6: [157, 234, 50],    # RoadLines
-        7: [128, 64, 128],    # Roads
-        8: [244, 35, 232],    # Sidewalks
-        9: [107, 142, 35],    # Vegetation
-        10: [0, 0, 255],      # Vehicles
-        11: [102, 102, 156],  # Walls
-        12: [220, 220, 0]     # TrafficSigns
-    }
-    array = labels_to_array(image)
-    result = numpy.zeros((array.shape[0], array.shape[1], 3))
-    for key, value in classes.items():
-        result[numpy.where(array == key)] = value
-    return result
-
-
-def labels_to_array(image):
-    """
-    Convert an image containing CARLA semantic segmentation labels to a 2D array
-    containing the label of each pixel.
-    """
-    return to_bgra_array(image)[:, :, 2]
-
-
-def to_bgra_array(image):
-    """Convert a CARLA raw image to a BGRA numpy array."""
-    #if not isinstance(image, sensor.Image):
-    #    raise ValueError("Argument must be a carla.sensor.Image")
-    array = numpy.frombuffer(image.raw_data, dtype=numpy.dtype("uint8"))
-    array = numpy.reshape(array, (image.height, image.width, 4))
-    return array
-
-###########################################################
-#
-# iSensor Class definitions
+# ISENSOR - a class which defines CARLA sensor objects and
+# provides an API for attaching to a car and saving images.
 #
 ###########################################################
 
@@ -87,15 +32,15 @@ class iSensor:
         self.y = 0
         self.z = 0
         self.yaw = 0
-	self.imageQueue = queue.Queue()
-	self._type = 'rgb'
+        self.imageQueue = queue.Queue()
+        self._type = 'rgb'
 
     def set_meta_params(self, dirname, path, name):
         self.dirpath = '%s/%s/%s' % (dirname, path,name)
-	cwd = os.getcwd()
-	path = os.path.join(cwd, self.dirpath)
+        cwd = os.getcwd()
+        path = os.path.join(cwd, self.dirpath)
         if not(os.path.exists(path)):
-	    os.makedirs(path)
+            os.makedirs(path)
         
     def set_params(self, x, y, z, yaw):
         self.x = x
@@ -103,50 +48,49 @@ class iSensor:
         self.z = z
         self.yaw = yaw
 
-    def get_params(self):
-        return_list = [self.x, self.y, self.z, self.yaw]
-        return return_list
-
-    def attach_to_car(self, car, blueprint, world, rgb):
+    def attach_to_car(self, car, blueprint, world, sensorType):
         camera_transform = carla.Transform(carla.Location(x=self.x, y=self.y, z=self.z), carla.Rotation(yaw=self.yaw))
-	if rgb == True:
-        	camera_bp = blueprint.find('sensor.camera.rgb') #default set to rgb
-		self._type = 'rgb'
-	else:
-		camera_bp = blueprint.find('sensor.camera.semantic_segmentation')
-		self._type = 'seg'
+        if sensorType == 'rgb':
+            camera_bp = blueprint.find('sensor.camera.rgb') #default set to rgb
+            self._type = 'rgb'
+        elif sensorType == 'seg':
+            camera_bp = blueprint.find('sensor.camera.semantic_segmentation')
+            self._type = 'seg'
+        elif sensorType == 'depth':
+            camera_bp = blueprint.find('sensor.camera.depth')
+            self._type = 'depth'
         self.sensor = world.spawn_actor(camera_bp, camera_transform, attach_to=car)
 
     def listen(self):
-	#print("Saving to: %s" % (self.dirpath))
-        #self.sensor.listen(lambda image: image.save_to_disk('%s/%s/%06d.png' % (dirname, self.dirpath,image.frame_number)))
-	self.sensor.listen(self.imageQueue.put)
+        self.sensor.listen(self.imageQueue.put)
 
     def saveImage(self,frameNumber):
-	if self._type == 'rgb':
-	    image = self.imageQueue.get()
-	    image.save_to_disk('%s/%06d.png' % (self.dirpath, frameNumber))
-	elif self._type == 'seg':
-	    image = self.imageQueue.get()
-            convertedImage = semantic_seg_image_converter(image)
-	    scipy.misc.toimage(convertedImage).save('%s/%06d.png' % (self.dirpath, frameNumber))
+        image = self.imageQueue.get()
+        if self._type == 'seg':
+            image.convert(carla.ColorConverter.CityScapesPalette)
+        elif self._type == 'depth':
+            image.convert(carla.ColorConverter.LogarithmicDepth)
+        image.save_to_disk('%s/%06d.png' % (self.dirpath, frameNumber))
 
     def destroy(self):
-	self.sensor.destroy()
+        self.sensor.destroy()
 
 ###########################################################
 #
-# Function to check the format of the .cam file and create
-# the sensor objects.
+# SENSOR CREATOR - reads the input .cam file, creates a list
+# of sensor objects attached to the egoVehicle.
 #
 ###########################################################
 
-def sensorCreator(filename, car, blueprint, world, dirname, dirprefix, rgb):
+def sensorCreator(filename, car, client, dirname, dirprefix, sensorType):
+    world = client.get_world()
+    blueprint = world.get_blueprint_library()
     if os.path.isfile(filename) == False:
-	print(".cam file specified does not exist. Please check the path.")
-	return
+        print(".cam file specified does not exist. Please check the path.")
+        return
     fp = open(filename)
     iSensor_list = []
+    linecounter = 0
     for line in fp:
         firstchar = line[0]
         if firstchar != '#': #If the line is not a comment...
@@ -160,8 +104,9 @@ def sensorCreator(filename, car, blueprint, world, dirname, dirprefix, rgb):
                 new_sensor = iSensor()
                 new_sensor.set_params(float(args[1]), float(args[2]), float(args[3]), int(args[4]))
                 new_sensor.set_meta_params(dirname, dirprefix, args[0])
-		new_sensor.attach_to_car(car, blueprint, world, rgb)
+                new_sensor.attach_to_car(car, blueprint, world, sensorType)
                 iSensor_list.append(new_sensor)
+        linecounter = linecounter + 1
     for sensor in iSensor_list:
         sensor.listen()
     return iSensor_list
@@ -175,74 +120,197 @@ def sensorCreator(filename, car, blueprint, world, dirname, dirprefix, rgb):
 
 def imageSaver(sensorList, frameNumber, maxThreads):
     numSensors = len(sensorList)
-    numFullThreads = numSensors / maxThreads
+    numFullThreads = int(numSensors / maxThreads)
     threadRemainder = numSensors % maxThreads
     #Start full threads
     sensorCounter = 0
     if numFullThreads > 0:
-	for j in range(0, numFullThreads):
-	    for i in range(0, maxThreads):
-	        threads = list()
-	        thread = threading.Thread(target = sensorList[sensorCounter].saveImage, args=(frameNumber,))
-	        threads.append(thread)
-	        sensorCounter = sensorCounter + 1
-	        thread.start()
-	    for thread in threads:
-		thread.join()
+        for j in range(0, numFullThreads):
+            for i in range(0, maxThreads):
+                threads = list()
+                thread = threading.Thread(target = sensorList[sensorCounter].saveImage, args=(frameNumber,))
+                threads.append(thread)
+                sensorCounter = sensorCounter + 1
+                thread.start()
+            for thread in threads:
+                thread.join()
     if threadRemainder > 0:
-	for i in range(0, threadRemainder):
-	    threads = list()
-	    thread = threading.Thread(target = sensorList[sensorCounter].saveImage, args=(frameNumber,))
-	    threads.append(thread)
-	    sensorCounter = sensorCounter + 1
-	    thread.start()
-	for thread in threads:
+        for i in range(0, threadRemainder):
+            threads = list()
+            thread = threading.Thread(target = sensorList[sensorCounter].saveImage, args=(frameNumber,))
+            threads.append(thread)
+            sensorCounter = sensorCounter + 1
+            thread.start()
+        for thread in threads:
             thread.join()
     return
 
+##############################################################
+#
+#   RUN_CONDITION
+#
+##############################################################
+
+def runCondition(condName, condWeather, condLights, logFile, logFileName, logFrames, sensorFile, sensorDir, sensorType, threadNumber, client):
+
+    dirprefix = '%s/%s' % (logFileName, condName)
+
+    #Replay the log file
+    client.replay_file(logFile, 0, 0, 0)
+
+    #Turn on synchronous mode
+    settings = client.get_world().get_settings()
+    settings.synchronous_mode = True
+    settings.fixed_delta_seconds = 0.10
+    client.get_world().apply_settings(settings)
+
+    actorList = client.get_world().get_actors()
+
+    #Set the weather and manage the headlights.
+    if sensorType == 'rgb':
+        client.get_world().set_weather(condWeather)
+        vehicleList = actorList.filter('vehicle.*')
+        lightState = carla.VehicleLightState.NONE
+        lightState |= carla.VehicleLightState.Position
+        if(condLights == True):
+            lightState |= carla.VehicleLightState.LowBeam
+            lightState |= carla.VehicleLightState.Fog
+        for vehicle in vehicleList:
+            vehicle.set_light_state(carla.VehicleLightState(lightState))
+     #Wait 42 frames for vehicles to spawn - this is just the behaviour of the .log file.
+    for i in range(0, 21):
+        client.get_world().tick()
+    #Find the hero vehicle and attach the sensors.
+    egoVehicle = None
+    audiList = actorList.filter('vehicle.audi.tt')
+    for actor in audiList:
+        if(actor.attributes["role_name"] == 'hero'):
+            egoVehicle = actor
+            break
+    if egoVehicle == None:
+        print("Error: Could not find the ego vehicle!")
+        return
+
+    sensorList = sensorCreator(sensorFile, egoVehicle, client, sensorDir, dirprefix, sensorType)
+
+    #Wait for the running log to finish
+    for frameNumber in range (0,10):#(0,int(nFrames/2)-40):
+        client.get_world().tick()
+        imageSaver(sensorList, frameNumber, int(threadNumber))
+
+    #Destroy the cameras - required since the car they are attached to is deleted on replay.
+    #World should be asynchronous again - speed increase since no more data is collected.
+    settings = client.get_world().get_settings()
+    settings.synchronous_mode = False
+    settings.fixed_delta_seconds = 0
+    client.get_world().apply_settings(settings)
+    for sensor in sensorList:
+        sensor.destroy()
+
 ###########################################################
 #
-# WEATHER HANDLER - handles the list of weather parameters
+# WEATHER HANDLER - creates a list of weatherConditions from input file
 #
 ########################################################### 
 
-def weatherHandler(line, lineCounter):
-    args = line.split(",")
-    if len(args) != 6:
-	print("Error: Incorrect number of arguments on line %i of weather .csv file." % lineCounter)
-	return
-    clouds = float(args[0])
-    rain = float(args[1])
-    water = float(args[2])
-    wind = float(args[3])
-    azimuth = float(args[4])
-    altitude = float(args[5])
-    if (clouds > 100 or clouds < 0):
-        print("Clouds should be in range 0 < clouds < 100.")
-	return
-    if (rain > 100 or rain < 0):
-        print("Rain should be in range 0 < rain < 100.")
-	return
-    if (water > 100 or water < 0):
-        print("Water should be in range 0 < water < 100.")
-	return
-    if (wind > 100 or wind < 0):
-        print("Wind should be in range 0 < wind < 100.")
-	return
-    if (azimuth > 360 or azimuth < 0):
-        print("Azimuth should be in range 0 < azimuth < 360.")
-	return
-    if (altitude > 90 or altitude < -90):
-        print("Altitude should be in range -90 < altitude < 90.")
-	return
-    weather = carla.WeatherParameters(
-	cloudyness = clouds,
-        precipitation = rain,
-	precipitation_deposits = water,
-	wind_intensity = wind,
-	sun_azimuth_angle = azimuth,
-	sun_altitude_angle = altitude)
-    return weather
+class weatherCondition:
+    def __init__(self):
+        self.weather = carla.WeatherParameters()
+        self.headlights = False
+        self.name = ""
+
+    def setWeather(self, weather):
+        self.weather = weather
+
+    def setName(self, string):
+        self.name = string
+
+    def setHeadlights(self, boolin):
+        self.headlights = bool(boolin)
+
+    def getWeather(self):
+        return self.weather
+
+    def getName(self):
+        return self.name
+
+    def getHeadlights(self):
+        return self.headlights
+
+    def printWeather(self):
+        print("WEATHER CONDITION")
+        print("    Name: %s" % self.name)
+        print("    Weather:", self.weather)
+        print("    Headlights: ", self.headlights)
+        
+def weatherListConstructor(filename):
+    if os.path.isfile(filename) == False:
+        print("Weather .csv file specified does not exist. Please check the path.")
+        return
+    fp = open(filename)
+    weatherList = []
+    lineCount = 0
+    for line in fp:
+        if line[0] != '#': #If the line is not a comment...
+            args = line.split(",")
+            if len(args) != 11:
+                print("Error: expected 11 arguments on line %i of weather file." % lineCount)
+                return
+            Name = args[0]
+            cloudiness = float(args[1])
+            precipitation = float(args[2])
+            precipitation_deposits = float(args[3])
+            wind_intensity = float(args[4])
+            fog_density = float(args[5])
+            fog_distance = float(args[6])
+            wetness = float(args[7])
+            sun_azimuth_angle = float(args[8])
+            sun_altitude_angle = float(args[9])
+            headlights = float(args[10])
+            if (cloudiness > 100 or cloudiness < 0):
+                print("Line %i: Clouds should be in range 0 < clouds < 100." % lineCount)
+                return
+            if (precipitation > 100 or precipitation < 0):
+                print("Line %i: Rain should be in range 0 < rain < 100." % lineCount)
+                return
+            if (precipitation_deposits > 100 or precipitation_deposits < 0):
+                print("Line %i: Water should be in range 0 < water < 100." % lineCount)
+                return
+            if (wind_intensity > 100 or wind_intensity < 0):
+                print("Line %i: Wind should be in range 0 < wind < 100." % lineCount)
+                return
+            if (fog_density > 100 or fog_density < 0):
+                print("Line %i: Fog density should be in range 0 < fog density < 100." % lineCount)
+                return
+            if (fog_distance < 0):
+                print("Line %i: Fog distance should be in range 0 < fog distance." % lineCount)
+                return
+            if (wetness > 100 or wetness < 0):
+                print("Line %i: Wetness should be in range 0 < wetness < 100." % lineCount)
+                return
+            if (sun_azimuth_angle > 360 or sun_azimuth_angle < 0):
+                print("Line %i: Azimuth should be in range 0 < azimuth < 360." % lineCount)
+                return
+            if (sun_altitude_angle > 90 or sun_altitude_angle < -90):
+                print("Line %i: Altitude should be in range -90 < altitude < 90." % lineCount)
+                return
+            weather = carla.WeatherParameters(
+                cloudiness = cloudiness,
+                precipitation = precipitation,
+	        precipitation_deposits = precipitation_deposits,
+	        wind_intensity = wind_intensity,
+                fog_density = fog_density,
+                fog_distance = fog_distance,
+                wetness = wetness,
+	        sun_azimuth_angle = sun_azimuth_angle,
+	        sun_altitude_angle = sun_altitude_angle)
+            newCondition = weatherCondition()
+            newCondition.setName(Name)
+            newCondition.setWeather(weather)
+            newCondition.setHeadlights(headlights)
+            weatherList.append(newCondition)
+        lineCount = lineCount + 1
+    return weatherList
 
 ###########################################################
 #
@@ -259,10 +327,9 @@ def getLogFrames(logFile, client):
     return logFrames
 
 def getLogName(logFile):
-    logFileName = logFile.split(".")[0]
-    logFileName = logFileName.split("/")
-    lfLength = len(logFileName)
-    logFileName = logFileName[lfLength - 1]
+    sections = logFile.split("/")
+    filename = sections[len(sections)-1]
+    logFileName = filename.split(".")[0]
     return logFileName
 
 ###########################################################
@@ -316,123 +383,42 @@ def main():
 
     #Get recorder file info.
     logFileName = getLogName(args.logfile)
-    nFrames = getLogFrames(args.logfile, client)
-    world = client.get_world()
-    blueprint_library = world.get_blueprint_library()
-
-    #Set the world to synchronous mode to avoid frame dropping and set FPS to 20.
-    settings = world.get_settings()
-    settings.synchronous_mode = False
-    settings.fixed_delta_seconds = 0.05
-    world.apply_settings(settings)
+    logFrames = getLogFrames(args.logfile, client)
 
     print("Begin processing at %s" % datetime.datetime.now())
+    dfltWthr = client.get_world().get_weather()
 
-    if os.path.isfile(args.weather_parameters) == False:
-	print(".csv Weather file specified does not exist. Please check the path.")
-	return
-    weatherFile = open(args.weather_parameters)
-    ######################################
-    #
-    # SEMANTIC SEGMENTATION
-    #
-    ######################################
-    dirprefix = '%s/semantic' % logFileName
-    client.replay_file(args.logfile, 0, 0, 0)
-#World updates to the log file on the next tick - required to wait to read actor pool.
-    world = client.get_world()
-    world.wait_for_tick()
-    world = client.get_world()
-    #Make world synchronous
-    settings = world.get_settings()
-    settings.synchronous_mode = True
-    settings.fixed_delta_seconds = 0.05
-    world.apply_settings(settings)
+    #Run all conditions - Semantic, Depth, Weather Conditions
 
-    #Wait 65 frames for vehicles to spawn.
-    for i in range(0, 40):
-	client.get_world().tick()
+    runCondition('Semantic', dfltWthr, False, args.logfile, logFileName, logFrames, args.sensors, args.dir, 'seg', args.max_threads, client)
+    runCondition('Depth', dfltWthr, False, args.logfile, logFileName, logFrames, args.sensors, args.dir, 'depth', args.max_threads, client)
 
-    #Find the hero vehicle and attach the sensors.
-    egoVehicle = None
-    actorList = world.get_actors().filter('vehicle.*')
-    for actor in actorList:
-	if(actor.attributes.get('role_name') == 'hero'):
-            egoVehicle = actor
-	    break
-	if egoVehicle == None:
-	    print("Error: Could not find the ego vehicle!")
-	    return
-    sensorList = sensorCreator(args.sensors, egoVehicle, blueprint_library, world, args.dir, dirprefix, False)
-	
-    #Wait for the running log to finish
-    for frameNumber in range (0, nFrames - 86): #-86 is a fudge factor for the recording to end.
-	client.get_world().tick()
-	imageSaver(sensorList, frameNumber, int(args.max_threads))
+    weatherConditionList = weatherListConstructor(args.weather_parameters)
+    for weather in weatherConditionList:
+        runCondition(weather.getName(), weather.getWeather(), weather.getHeadlights(), args.logfile, logFileName, logFrames, args.sensors, args.dir, 'rgb', args.max_threads, client)
 
-    #Destroy the cameras - required since the car they are attached to is deleted on replay.
-    #World should be asynchronous again - speed increase since no more data is collected.
-    settings = world.get_settings()
-    settings.synchronous_mode = False
-    settings.fixed_delta_seconds = 0.05
-    world.apply_settings(settings)
-    for sensor in sensorList:
-        sensor.destroy()
+    #Remove all actors.
+    actorList = client.get_world().get_actors()
+    vehicles = actorList.filter('vehicle.*')
+    walkers = actorList.filter('walker.*')
+    idList = []
+    for vehicle in vehicles:
+        idList.append(vehicle.id)
+    for walker in walkers:
+        idList.append(walker.id)
 
-    ######################################
-    #
-    # WEATHER CONDITIONS
-    #
-    ######################################
-    for line in weatherFile:
-        #Read one set of weather conditions from the .csv input file.
-        weather = weatherHandler(line, 0)
-        if (weather == None):
-	    return
-        dirprefix = '%s/%d_%d_%d_%d_%d_%d' % (logFileName, weather.cloudyness, weather.precipitation, weather.precipitation_deposits, weather.wind_intensity, weather.sun_azimuth_angle, weather.sun_altitude_angle)
-        #Replay the selected log file.
-	client.replay_file(args.logfile, 0, 0, 0)
-        #World updates to the log file on the next tick - required to wait to read actor pool.
-        world = client.get_world()
-        world.wait_for_tick()
-        world = client.get_world()
-	#Make world synchronous
-	settings = world.get_settings()
-    	settings.synchronous_mode = True
-	settings.fixed_delta_seconds = 0.05
-   	world.apply_settings(settings)
+    chunkSize = 9
 
-	#Wait 40 frames for vehicles to spawn.
-        for i in range(0, 40):
-	    client.get_world().tick()
+    numFullChunks = int(len(idList) / chunkSize)
+    chunkRemainder = len(idList) % chunkSize
 
-        #Find the hero vehicle and attach the sensors.
-	egoVehicle = None
-	actorList = world.get_actors().filter('vehicle.*')
-	for actor in actorList:
-	    if(actor.attributes.get('role_name') == 'hero'):
-		egoVehicle = actor
-		break
-	if egoVehicle == None:
-	    print("Error: Could not find the ego vehicle!")
-	    return
-
-	sensorList = sensorCreator(args.sensors, egoVehicle, blueprint_library, world, args.dir, dirprefix, True)
-        world.set_weather(weather)
-	
-        #Wait for the running log to finish
-	for frameNumber in range (0, nFrames - 86): #-86 is a fudge factor for the recording to end.
-	    client.get_world().tick()
-	    imageSaver(sensorList, frameNumber, int(args.max_threads))
-
-        #Destroy the cameras - required since the car they are attached to is deleted on replay.
-	#World should be asynchronous again - speed increase since no more data is collected.
-        settings = world.get_settings()
-        settings.synchronous_mode = False
-	settings.fixed_delta_seconds = 0.05
-        world.apply_settings(settings)
-        for sensor in sensorList:
-            sensor.destroy()
+    if numFullChunks > 0:
+        for i in range(0, numFullChunks):
+            chunk = idList[(chunkSize*i):(chunkSize*i)+(chunkSize)]
+            client.apply_batch_sync([carla.command.DestroyActor(x) for x in chunk])
+    if chunkRemainder > 0:
+        chunk = idList[(chunkSize*numFullChunks):(chunkSize*numFullChunks)+chunkRemainder]
+        client.apply_batch_sync([carla.command.DestroyActor(x) for x in chunk])
 
     print("End processing at %s" % datetime.datetime.now())
 
