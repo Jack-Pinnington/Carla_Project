@@ -1,0 +1,8 @@
+# Line comment using hash character.
+# Name X Y Z Yaw
+bumperLeft 1.88 -0.5 0.75 0
+bumperRight 1.88 0.5 0.75 0
+roofLeft 0.22 -0.2 1.25 0
+roofRight 0.22 0.2 1.25 0
+bonnetLeft 0.78 -0.5 1.15 0
+bonnetRight 0.78 0.5 1.15 0
