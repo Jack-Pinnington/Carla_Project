@@ -334,6 +334,26 @@ def getLogName(logFile):
 
 ###########################################################
 #
+# Batch destroy actors - taken from generateFreeDrivingLog.py
+#
+############################################################
+
+def batchDestroy(client, actorList, chunkSize):
+    response = []
+    numFullChunks = int(len(actorList) / chunkSize)
+    chunkRemainder = len(actorList) % chunkSize
+    if numFullChunks > 0:
+        for i in range(0, numFullChunks):
+            chunk = actorList[(chunkSize*i):(chunkSize*i)+(chunkSize)]
+            batchResponse = client.apply_batch_sync([carla.command.DestroyActor(x) for x in chunk])
+            response.extend(batchResponse)
+    if chunkRemainder > 0:
+        chunk = actorList[(chunkSize*numFullChunks):(chunkSize*numFullChunks)+chunkRemainder]
+        batchResponse = client.apply_batch_sync([carla.command.DestroyActor(x) for x in chunk])
+        response.extend(batchResponse)
+
+###########################################################
+#
 # MAIN - passes arguments
 #
 ###########################################################
@@ -398,27 +418,14 @@ def main():
         runCondition(weather.getName(), weather.getWeather(), weather.getHeadlights(), args.logfile, logFileName, logFrames, args.sensors, args.dir, 'rgb', args.max_threads, client)
 
     #Remove all actors.
-    actorList = client.get_world().get_actors()
-    vehicles = actorList.filter('vehicle.*')
-    walkers = actorList.filter('walker.*')
     idList = []
-    for vehicle in vehicles:
+    actorList = client.get_world().get_actors()
+    for vehicle in actorList.filter('vehicle.*'):
         idList.append(vehicle.id)
-    for walker in walkers:
+    for walker in actorList.filter('walker.*'):
         idList.append(walker.id)
 
-    chunkSize = 9
-
-    numFullChunks = int(len(idList) / chunkSize)
-    chunkRemainder = len(idList) % chunkSize
-
-    if numFullChunks > 0:
-        for i in range(0, numFullChunks):
-            chunk = idList[(chunkSize*i):(chunkSize*i)+(chunkSize)]
-            client.apply_batch_sync([carla.command.DestroyActor(x) for x in chunk])
-    if chunkRemainder > 0:
-        chunk = idList[(chunkSize*numFullChunks):(chunkSize*numFullChunks)+chunkRemainder]
-        client.apply_batch_sync([carla.command.DestroyActor(x) for x in chunk])
+    batchDestroy(client, idList, 10)
 
     print("End processing at %s" % datetime.datetime.now())
 
