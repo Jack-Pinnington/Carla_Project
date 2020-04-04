@@ -62,6 +62,35 @@ def spawnBike(spawnPoint):
     command = SpawnActor(vehicle_bp, spawnPoint).then(SetAutopilot(FutureActor, True))
     return command
 
+def batchSpawn(client, actorList, chunkSize):
+    response = []
+    numFullChunks = int(len(actorList) / chunkSize)
+    chunkRemainder = len(actorList) % chunkSize
+    if numFullChunks > 0:
+        for i in range(0, numFullChunks):
+            chunk = actorList[(chunkSize*i):(chunkSize*i)+(chunkSize)]
+            batchResponse = client.apply_batch_sync(chunk)
+            response.extend(batchResponse)
+    if chunkRemainder > 0:
+        chunk = actorList[(chunkSize*numFullChunks):(chunkSize*numFullChunks)+chunkRemainder]
+        batchResponse = client.apply_batch_sync(chunk)
+        response.extend(batchResponse)
+    return response
+
+def batchDestroy(client, actorList, chunkSize):
+    response = []
+    numFullChunks = int(len(actorList) / chunkSize)
+    chunkRemainder = len(actorList) % chunkSize
+    if numFullChunks > 0:
+        for i in range(0, numFullChunks):
+            chunk = actorList[(chunkSize*i):(chunkSize*i)+(chunkSize)]
+            batchResponse = client.apply_batch_sync([carla.command.DestroyActor(x) for x in chunk])
+            response.extend(batchResponse)
+    if chunkRemainder > 0:
+        chunk = actorList[(chunkSize*numFullChunks):(chunkSize*numFullChunks)+chunkRemainder]
+        batchResponse = client.apply_batch_sync([carla.command.DestroyActor(x) for x in chunk])
+        response.extend(batchResponse)
+
 def main():
     argparser = argparse.ArgumentParser(
         description=__doc__)
@@ -78,15 +107,31 @@ def main():
         help='TCP port to listen to (default: 2000)')
     argparser.add_argument(
 	'--recorderFile',
-        default='/home/jack/Carla/Carla_0.9.8_package/Town03.log')
+        default='/home/jack/Carla/Carla_0.9.8_package/Town01_test.log')
     argparser.add_argument(
 	'--recorderTime',
-	default = 180,
+	default = 5,
+        type=float)
+    argparser.add_argument(
+	'--numWalkers',
+	default = 60,
+        type=float)
+    argparser.add_argument(
+	'--numCars',
+	default = 90,
+        type=float)
+    argparser.add_argument(
+	'--numMotorbikes',
+	default = 15,
+        type=float)
+    argparser.add_argument(
+	'--numBicycles',
+	default = 15,
         type=float)
     args = argparser.parse_args()
     client = carla.Client(args.host, args.port)
     client.set_timeout(1000)
-    client.load_world('Town03')
+    client.load_world('Town01')
     world = client.get_world()
 
     blueprint_library = world.get_blueprint_library()
@@ -124,30 +169,23 @@ def main():
         blueprint.set_attribute('driver_id', driver_id)
     vehiclesToSpawn.append(SpawnActor(hero_bp, hero_transform).then(SetAutopilot(FutureActor, True)))
 
-    for i in range(1, 90):
+    #Spawn other vehicles
+    carFinish = args.numCars + 1
+    motorbikeStart = carFinish
+    motorbikeFinish = motorbikeStart + args.numMotorbikes
+    bicycleStart = motorbikeFinish
+    bicycleFinish = bicycleStart + args.numBicycles
+
+    for i in range(1, carFinish):
         vehiclesToSpawn.append(spawnCar(spawn_points[i]))
-    for i in range(91, 105):
+    for i in range(motorbikeStart, motorbikeFinish):
         vehiclesToSpawn.append(spawnMotorbike(spawn_points[i]))
-    for i in range(106, 110):
+    for i in range(bicycleStart, bicycleFinish):
         vehiclesToSpawn.append(spawnBike(spawn_points[i]))
 
-    #Necessary to batch_sync in chunks - sending all at once will cause a SegFault in the server.
-    chunkSize = 9
-    numFullChunks = int(len(vehiclesToSpawn) / chunkSize)
-    chunkRemainder = len(vehiclesToSpawn) % chunkSize
     print('Spawning %s Vehicles!' % len(vehiclesToSpawn))
-    if numFullChunks > 0:
-        for i in range(0, numFullChunks):
-            chunk = vehiclesToSpawn[(chunkSize*i):(chunkSize*i)+(chunkSize)]
-            batchResponse = client.apply_batch_sync(chunk)
-            for response in batchResponse:
-                spawnedVehicleIDs.append(response.actor_id)
-    if chunkRemainder > 0:
-        chunk = vehiclesToSpawn[(chunkSize*numFullChunks):(chunkSize*numFullChunks)+chunkRemainder]
-        batchResponse = client.apply_batch_sync(chunk)
-        for response in batchResponse:
-            spawnedVehicleIDs.append(response.actor_id)
-
+    for response in batchSpawn(client, vehiclesToSpawn, 10):
+        spawnedVehicleIDs.append(response.actor_id)
     world.wait_for_tick()
 
 ########################################################
@@ -156,12 +194,12 @@ def main():
 #
 ########################################################
     # some settings
-    walkerNumber = 60
+    walkerNumber = args.numWalkers
     blueprintsWalkers = blueprint_library.filter('walker.pedestrian.*')
     percentagePedestriansRunning = 0.1      # how many pedestrians will run
     percentagePedestriansCrossing = 0.2     # how many pedestrians will walk through the road
 
-    # 1. take all the random locations to spawn
+    # Find my spawn locations.
     walkerSpawnPoints = []
     for i in range(walkerNumber):
         spawn_point = carla.Transform()
@@ -169,9 +207,10 @@ def main():
         if (loc != None):
             spawn_point.location = loc
             walkerSpawnPoints.append(spawn_point)
-    # 2. Create Walker Blueprints
+
+    # Create Walker Blueprints
     walkersToSpawn = []
-    walker_speed = []
+    walkerBPSpeed = []
     for spawn_point in walkerSpawnPoints:
         walker_bp = random.choice(blueprintsWalkers)
         # set as not invincible
@@ -181,88 +220,56 @@ def main():
         if walker_bp.has_attribute('speed'):
             if (random.random() > percentagePedestriansRunning):
                 # walking
-                walker_speed.append(walker_bp.get_attribute('speed').recommended_values[1])
+                walkerBPSpeed.append(walker_bp.get_attribute('speed').recommended_values[1])
             else:
                 # running
-                walker_speed.append(walker_bp.get_attribute('speed').recommended_values[2])
+                walkerBPSpeed.append(walker_bp.get_attribute('speed').recommended_values[2])
         else:
             print("Walker has no speed")
-            walker_speed.append(0.0)
+            walkerBPSpeed.append(0.0)
         walkersToSpawn.append(SpawnActor(walker_bp, spawn_point))
 
-    #Batch Spawn Walkers.
+    #Batch Spawn Walkers
     spawnedWalkerList = []
-    walker_speed2 = []
-    chunkSize = 9
-    numFullChunks = int(len(walkersToSpawn) / chunkSize)
-    chunkRemainder = len(walkersToSpawn) % chunkSize
+    walkerSpawnedSpeed = []
     print('Spawning Walkers!')
-    if numFullChunks > 0:
-        for i in range(0, numFullChunks):
-            chunk = walkersToSpawn[(chunkSize*i):(chunkSize*i)+(chunkSize)]
-            batchResponse = client.apply_batch_sync(chunk)
-            for response in batchResponse:
-                spawnedWalkerList.append({"id": response.actor_id})
-                walker_speed2.append(walker_speed[i])
-    if chunkRemainder > 0:
-        chunk = walkersToSpawn[(chunkSize*numFullChunks):(chunkSize*numFullChunks)+chunkRemainder]
-        batchResponse = client.apply_batch_sync(chunk)
-        for response in batchResponse:
+    responseNumber = 0
+    for response in batchSpawn(client, walkersToSpawn, 10):
+        if not(response.error):
             spawnedWalkerList.append({"id": response.actor_id})
-            walker_speed2.append(walker_speed[i])
-    #results = client.apply_batch_sync(batch, True)
-    walker_speed = walker_speed2
+            walkerSpawnedSpeed.append(walkerBPSpeed[responseNumber])
+        responseNumber = responseNumber + 1
 
-    # 3. Create walker controllers
+    # Create walker controllers
     walkerControllersToSpawn = []
     walker_controller_bp = world.get_blueprint_library().find('controller.ai.walker')
     for i in range(len(spawnedWalkerList)):
         walkerControllersToSpawn.append(SpawnActor(walker_controller_bp, carla.Transform(), spawnedWalkerList[i]["id"]))
 
-    #Batch the walker controllers!
-    chunkSize = 9
-    numFullChunks = int(len(walkerControllersToSpawn) / chunkSize)
-    chunkRemainder = len(walkerControllersToSpawn) % chunkSize
+    # Batch the controllers
     resultCounter = 0
-    print('Spawning Controllers!')
-    if numFullChunks > 0:
-        for i in range(0, numFullChunks):
-            chunk = walkerControllersToSpawn[(chunkSize*i):(chunkSize*i)+(chunkSize)]
-            batchResponse = client.apply_batch_sync(chunk)
-            for response in batchResponse:
-                spawnedWalkerList[resultCounter]["con"] = response.actor_id
-                resultCounter = resultCounter + 1
-    if chunkRemainder > 0:
-        chunk = walkerControllersToSpawn[(chunkSize*numFullChunks):(chunkSize*numFullChunks)+chunkRemainder]
-        batchResponse = client.apply_batch_sync(chunk)
-        for response in batchResponse:
-            spawnedWalkerList[resultCounter]["con"] = response.actor_id
-            resultCounter = resultCounter + 1
+    for response in batchSpawn(client, walkerControllersToSpawn, 10):
+        spawnedWalkerList[resultCounter]["con"] = response.actor_id
+        resultCounter = resultCounter + 1
 
-    # 4. we put altogether the walkers and controllers id to get the objects from their id
+    # Create a full list of IDs (walkerIDList) and list of controllers (controllerList)
     walkerIDList = []
-    for i in range(len(spawnedWalkerList)):
-        walkerIDList.append(spawnedWalkerList[i]["con"])
-        walkerIDList.append(spawnedWalkerList[i]["id"])
     controllerList = []
     for i in range(len(spawnedWalkerList)):
         controllerList.append(spawnedWalkerList[i]["con"])
+        walkerIDList.append(spawnedWalkerList[i]["con"])
+        walkerIDList.append(spawnedWalkerList[i]["id"])
     controllerList = world.get_actors(controllerList)
-    walkerActorList = world.get_actors(walkerIDList)
     world.wait_for_tick()
 
     print("Total walkers spawned: %s" % len(controllerList))
 
-    # 5. initialize each controller and set target to walk to (list is [controler, actor, controller, actor ...])
-    # set how many pedestrians can cross the road
+    # Set each controller to their seeded speed
     world.set_pedestrians_cross_factor(percentagePedestriansCrossing)
     for i in range(0, len(controllerList)):
-        # start walker
         controllerList[i].start()
-        # set walk to random point
         controllerList[i].go_to_location(world.get_random_location_from_navigation())
-        # max speed
-        controllerList[i].set_max_speed(float(walker_speed[int(i/2)]))
+        controllerList[i].set_max_speed(float(walkerSpawnedSpeed[i]))
 
 
 ##############################################################
@@ -283,33 +290,13 @@ def main():
     print('Output log saved to:  %s' % args.recorderFile)
 
     print('Deleting Vehicles!')
-    numFullChunks = int(len(spawnedVehicleIDs) / chunkSize)
-    chunkRemainder = len(spawnedVehicleIDs) % chunkSize
-    
-    if numFullChunks > 0:
-        for i in range(0, numFullChunks):
-            chunk = spawnedVehicleIDs[(chunkSize*i):(chunkSize*i)+(chunkSize)]
-            batchResponse = client.apply_batch_sync([carla.command.DestroyActor(x) for x in chunk])
-    if chunkRemainder > 0:
-        chunk = spawnedVehicleIDs[(chunkSize*numFullChunks):(chunkSize*numFullChunks)+chunkRemainder]
-        batchResponse = client.apply_batch_sync([carla.command.DestroyActor(x) for x in chunk])
+    batchDestroy(client, spawnedVehicleIDs, 10)
 
     #Delete the walker actors!
     print('Deleting Walkers + Controllers!')
-
     for i in range(0, len(controllerList)):
         controllerList[i].stop()
-
-    numFullChunks = int(len(walkerIDList) / chunkSize)
-    chunkRemainder = len(walkerIDList) % chunkSize
-    
-    if numFullChunks > 0:
-        for i in range(0, numFullChunks):
-            chunk = walkerIDList[(chunkSize*i):(chunkSize*i)+(chunkSize)]
-            batchResponse = client.apply_batch_sync([carla.command.DestroyActor(x) for x in chunk])
-    if chunkRemainder > 0:
-        chunk = walkerIDList[(chunkSize*numFullChunks):(chunkSize*numFullChunks)+chunkRemainder]
-        batchResponse = client.apply_batch_sync([carla.command.DestroyActor(x) for x in chunk])
+    batchDestroy(client, walkerIDList, 10)
 
 if __name__ == '__main__':
 
