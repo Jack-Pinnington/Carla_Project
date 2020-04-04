@@ -113,6 +113,10 @@ def main():
 	default = 5,
         type=float)
     argparser.add_argument(
+        '--townNumber',
+        default = 1,
+        type=int)
+    argparser.add_argument(
 	'--numWalkers',
 	default = 60,
         type=float)
@@ -131,7 +135,12 @@ def main():
     args = argparser.parse_args()
     client = carla.Client(args.host, args.port)
     client.set_timeout(1000)
-    client.load_world('Town01')
+    #Load the town.
+    if (args.townNumber < 0 or args.townNumber > 5):
+        print("Error: Expected town number in range 1 to 5.")
+        return
+    townName = 'Town0%i' % args.townNumber
+    client.load_world(townName)
     world = client.get_world()
 
     blueprint_library = world.get_blueprint_library()
