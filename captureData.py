@@ -107,8 +107,6 @@ def sensorCreator(filename, car, client, dirname, dirprefix, sensorType):
                 new_sensor.attach_to_car(car, blueprint, world, sensorType)
                 iSensor_list.append(new_sensor)
         linecounter = linecounter + 1
-    for sensor in iSensor_list:
-        sensor.listen()
     return iSensor_list
 
 ###########################################################
@@ -155,16 +153,28 @@ def runCondition(condName, condWeather, condLights, logFile, logFileName, logFra
 
     dirprefix = '%s/%s' % (logFileName, condName)
 
-    #Replay the log file
-    client.replay_file(logFile, 0, 0, 0)
-
     #Turn on synchronous mode
     settings = client.get_world().get_settings()
     settings.synchronous_mode = True
     settings.fixed_delta_seconds = 0.10
     client.get_world().apply_settings(settings)
 
+    #Replay the log file
+    client.replay_file(logFile, 0, 0, 0)
+    client.get_world().tick()
     actorList = client.get_world().get_actors()
+
+    #Find the hero vehicle and attach the sensors.
+    egoVehicle = None
+    audiList = actorList.filter('vehicle.audi.tt')
+    for actor in audiList:
+        if(actor.attributes["role_name"] == 'hero'):
+            egoVehicle = actor
+            break
+    if egoVehicle == None:
+        print("Error: Could not find the ego vehicle!")
+        return
+    sensorList = sensorCreator(sensorFile, egoVehicle, client, sensorDir, dirprefix, sensorType)
 
     #Set the weather and manage the headlights.
     if sensorType == 'rgb':
@@ -177,24 +187,20 @@ def runCondition(condName, condWeather, condLights, logFile, logFileName, logFra
             lightState |= carla.VehicleLightState.Fog
         for vehicle in vehicleList:
             vehicle.set_light_state(carla.VehicleLightState(lightState))
-     #Wait 42 frames for vehicles to spawn - this is just the behaviour of the .log file.
+
+    #weather = client.get_world().get_weather()
+    #weather.precipitation = 100
+    #client.get_world().set_weather(weather)
+
+    #Wait 42 frames for vehicles to spawn - this is just the behaviour of the .log file.
     for i in range(0, 21):
         client.get_world().tick()
-    #Find the hero vehicle and attach the sensors.
-    egoVehicle = None
-    audiList = actorList.filter('vehicle.audi.tt')
-    for actor in audiList:
-        if(actor.attributes["role_name"] == 'hero'):
-            egoVehicle = actor
-            break
-    if egoVehicle == None:
-        print("Error: Could not find the ego vehicle!")
-        return
 
-    sensorList = sensorCreator(sensorFile, egoVehicle, client, sensorDir, dirprefix, sensorType)
-
+    #Start saving data.
+    for sensor in sensorList:
+        sensor.listen() 
     #Wait for the running log to finish
-    for frameNumber in range (0,10):#(0,int(nFrames/2)-40):
+    for frameNumber in range (0,1):#(0,int(nFrames/2)-40):
         client.get_world().tick()
         imageSaver(sensorList, frameNumber, int(threadNumber))
 
@@ -380,12 +386,17 @@ def main():
 	help='.csv file of all of the desired weather scenarios to run.')
     argparser.add_argument(
 	'--dir',
-	default='.',
+	default='./output',
 	help='Directory output images will be saved to.')
     argparser.add_argument(
         '--sensors',
         default='nil',
         help='.cam file to define cameras to be attached to the vehicle.')
+    argparser.add_argument(
+        '--truth',
+	default=0,
+        type=bool,
+        help='Flag to generate depth and semantic ground truth.')
     argparser.add_argument(
         '-l', '--logfile',
         metavar='F',
@@ -409,9 +420,9 @@ def main():
     dfltWthr = client.get_world().get_weather()
 
     #Run all conditions - Semantic, Depth, Weather Conditions
-
-    runCondition('Semantic', dfltWthr, False, args.logfile, logFileName, logFrames, args.sensors, args.dir, 'seg', args.max_threads, client)
-    runCondition('Depth', dfltWthr, False, args.logfile, logFileName, logFrames, args.sensors, args.dir, 'depth', args.max_threads, client)
+    if bool(args.truth):
+        runCondition('Semantic', dfltWthr, False, args.logfile, logFileName, logFrames, args.sensors, args.dir, 'seg', args.max_threads, client)
+        runCondition('Depth', dfltWthr, False, args.logfile, logFileName, logFrames, args.sensors, args.dir, 'depth', args.max_threads, client)
 
     weatherConditionList = weatherListConstructor(args.weather_parameters)
     for weather in weatherConditionList:
