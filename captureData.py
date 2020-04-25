@@ -10,6 +10,8 @@ import logging
 import queue
 import datetime
 import threading
+import weakref
+import json
 
 try: 
     sys.path.append(glob.glob('**/carla-*%d.%d-%s.egg' % ( 
@@ -21,12 +23,164 @@ except IndexError:
 
 ###########################################################
 #
+#  Localization objects - GPS and IMU classes
+#
+###########################################################
+
+class IMUSensor(object):
+    def __init__(self, parent_actor):
+        self.sensor = None
+        self._parent = parent_actor
+        self.accelerometer = (0.0, 0.0, 0.0)
+        self.gyroscope = (0.0, 0.0, 0.0)
+        self.compass = 0.0
+        world = self._parent.get_world()
+        bp = world.get_blueprint_library().find('sensor.other.imu')
+        self.sensor = world.spawn_actor(
+            bp, carla.Transform(), attach_to=self._parent)
+        # We need to pass the lambda a weak reference to self to avoid circular
+        # reference.
+        weak_self = weakref.ref(self)
+        self.sensor.listen(
+            lambda sensor_data: IMUSensor._IMU_callback(weak_self, sensor_data))
+
+    @staticmethod
+    def _IMU_callback(weak_self, sensor_data):
+        self = weak_self()
+        if not self:
+            return
+        limits = (-99.9, 99.9)
+        self.accelerometer = (
+            max(limits[0], min(limits[1], sensor_data.accelerometer.x)),
+            max(limits[0], min(limits[1], sensor_data.accelerometer.y)),
+            max(limits[0], min(limits[1], sensor_data.accelerometer.z)))
+        self.gyroscope = (
+            max(limits[0], min(limits[1], math.degrees(sensor_data.gyroscope.x))),
+            max(limits[0], min(limits[1], math.degrees(sensor_data.gyroscope.y))),
+            max(limits[0], min(limits[1], math.degrees(sensor_data.gyroscope.z))))
+        self.compass = math.degrees(sensor_data.compass)
+
+    def data(self):
+        returnList = []
+        returnList.append(self.accelerometer)
+        returnList.append(self.gyroscope)
+        returnList.append(self.compass)
+        return returnList
+
+    def destroy(self):
+        self.sensor.destroy()
+
+class GnssSensor(object):
+    def __init__(self, parent_actor):
+        self.sensor = None
+        self._parent = parent_actor
+        self.lat = 0.0
+        self.lon = 0.0
+        world = self._parent.get_world()
+        bp = world.get_blueprint_library().find('sensor.other.gnss')
+        self.sensor = world.spawn_actor(bp, carla.Transform(carla.Location(x=1.0, z=2.8)), attach_to=self._parent)
+        # We need to pass the lambda a weak reference to self to avoid circular
+        # reference.
+        weak_self = weakref.ref(self)
+        self.sensor.listen(lambda event: GnssSensor._on_gnss_event(weak_self, event))
+
+    @staticmethod
+    def _on_gnss_event(weak_self, event):
+        self = weak_self()
+        if not self:
+            return
+        self.lat = event.latitude
+        self.lon = event.longitude
+
+    def data(self):
+        returnList = [self.lat, self.lon]
+        return returnList
+
+    def destroy(self):
+        self.sensor.destroy()
+
+def saveGPStoFile(imuList, gpsList, frameNumber, filePrefix):
+    filename = '%s/%06d.txt' % (filePrefix, frameNumber)
+    #Using JSON dict method
+    jsonDict = {"Accelerometer": imuList[0], "Gyroscope": imuList[1], "Compass": imuList[2], "Latitude": gpsList[0], "Longitude": gpsList[1]}
+    with open(filename, 'w') as outfile:
+        json.dump(jsonDict, outfile)
+    
+##############################################################
+#
+#   RUN_GPS
+#
+##############################################################
+def runGPS(logFile, logFileName, logFrames, outputDir, client):
+
+    #Make the GPS directory if it doesn't already exist.
+    dirPrefix = '%s/%s/GPS' % (outputDir, logFileName)
+    cwd = os.getcwd()
+    path = os.path.join(cwd, dirPrefix)
+    if not(os.path.exists(path)):
+        os.makedirs(path)
+
+    #Turn on synchronous mode
+    settings = client.get_world().get_settings()
+    settings.synchronous_mode = True
+    settings.fixed_delta_seconds = 0.10
+    client.get_world().apply_settings(settings)
+
+    for i in range(0,5):
+        client.get_world().tick()
+
+    #Replay the log file
+    client.replay_file(logFile, 0, 0, 0)
+    client.get_world().tick()
+    actorList = client.get_world().get_actors()
+
+    #Find the hero vehicle and attach the sensors.
+    egoVehicle = None
+    audiList = actorList.filter('vehicle.audi.tt')
+    for actor in audiList:
+        if(actor.attributes["role_name"] == 'hero'):
+            egoVehicle = actor
+            break
+    if egoVehicle == None:
+        print("Error: Could not find the ego vehicle!")
+        return
+    
+    #Create GPS and IMU sensor.
+    gpsSensor = GnssSensor(egoVehicle)
+    imuSensor = IMUSensor(egoVehicle)
+
+    #Wait 42 frames for vehicles to spawn - this is just the behaviour of the .log file.
+    for i in range(0, 21):
+        client.get_world().tick()
+
+    #Sleep here is required to prevent buffering problem - buffer will read from previous step rather than current.
+    time.sleep(1)
+
+    #Start saving data.
+    #Wait for the running log to finish
+    for frameNumber in range (0,1):#(0,int(nFrames/2)-40):
+        client.get_world().tick()
+        saveGPStoFile(imuSensor.data(), gpsSensor.data(), frameNumber, dirPrefix)
+        #imageSaver(sensorList, frameNumber, int(threadNumber))
+
+    #Destroy the cameras - required since the car they are attached to is deleted on replay.
+    #World should be asynchronous again - speed increase since no more data is collected.
+    settings = client.get_world().get_settings()
+    settings.synchronous_mode = False
+    settings.fixed_delta_seconds = 0
+    client.get_world().apply_settings(settings)
+
+    imuSensor.destroy()
+    gpsSensor.destroy()
+
+###########################################################
+#
 # ISENSOR - a class which defines CARLA sensor objects and
 # provides an API for attaching to a car and saving images.
 #
 ###########################################################
 
-class iSensor:
+class rgbSensor:
     def __init__(self):
         self.x = 0
         self.y = 0
@@ -82,14 +236,14 @@ class iSensor:
 #
 ###########################################################
 
-def sensorCreator(filename, car, client, dirname, dirprefix, sensorType):
+def rgbSensorCreator(filename, car, client, dirname, dirprefix, sensorType):
     world = client.get_world()
     blueprint = world.get_blueprint_library()
     if os.path.isfile(filename) == False:
         print(".cam file specified does not exist. Please check the path.")
         return
     fp = open(filename)
-    iSensor_list = []
+    rgbSensorList = []
     linecounter = 0
     for line in fp:
         firstchar = line[0]
@@ -101,13 +255,13 @@ def sensorCreator(filename, car, client, dirname, dirprefix, sensorType):
                     print("On line %i, yaw should be in range 0 to 359." % linecounter)
                     return
             else:
-                new_sensor = iSensor()
+                new_sensor = rgbSensor()
                 new_sensor.set_params(float(args[1]), float(args[2]), float(args[3]), int(args[4]))
                 new_sensor.set_meta_params(dirname, dirprefix, args[0])
                 new_sensor.attach_to_car(car, blueprint, world, sensorType)
-                iSensor_list.append(new_sensor)
+                rgbSensorList.append(new_sensor)
         linecounter = linecounter + 1
-    return iSensor_list
+    return rgbSensorList
 
 ###########################################################
 #
@@ -116,7 +270,7 @@ def sensorCreator(filename, car, client, dirname, dirprefix, sensorType):
 #
 ###########################################################
 
-def imageSaver(sensorList, frameNumber, maxThreads):
+def rgbSaver(sensorList, frameNumber, maxThreads):
     numSensors = len(sensorList)
     numFullThreads = int(numSensors / maxThreads)
     threadRemainder = numSensors % maxThreads
@@ -159,6 +313,9 @@ def runCondition(condName, condWeather, condLights, logFile, logFileName, logFra
     settings.fixed_delta_seconds = 0.10
     client.get_world().apply_settings(settings)
 
+    for i in range(0,5):
+        client.get_world().tick()
+
     #Replay the log file
     client.replay_file(logFile, 0, 0, 0)
     client.get_world().tick()
@@ -174,7 +331,7 @@ def runCondition(condName, condWeather, condLights, logFile, logFileName, logFra
     if egoVehicle == None:
         print("Error: Could not find the ego vehicle!")
         return
-    sensorList = sensorCreator(sensorFile, egoVehicle, client, sensorDir, dirprefix, sensorType)
+    sensorList = rgbSensorCreator(sensorFile, egoVehicle, client, sensorDir, dirprefix, sensorType)
 
     #Set the weather and manage the headlights.
     if sensorType == 'rgb':
@@ -195,6 +352,9 @@ def runCondition(condName, condWeather, condLights, logFile, logFileName, logFra
     #Wait 42 frames for vehicles to spawn - this is just the behaviour of the .log file.
     for i in range(0, 21):
         client.get_world().tick()
+    
+    #Sleep here is required to prevent buffering problem - buffer will read from previous step rather than current.
+    time.sleep(1)
 
     #Start saving data.
     for sensor in sensorList:
@@ -202,7 +362,7 @@ def runCondition(condName, condWeather, condLights, logFile, logFileName, logFra
     #Wait for the running log to finish
     for frameNumber in range (0,1):#(0,int(nFrames/2)-40):
         client.get_world().tick()
-        imageSaver(sensorList, frameNumber, int(threadNumber))
+        rgbSaver(sensorList, frameNumber, int(threadNumber))
 
     #Destroy the cameras - required since the car they are attached to is deleted on replay.
     #World should be asynchronous again - speed increase since no more data is collected.
@@ -396,7 +556,7 @@ def main():
         '--truth',
 	default=0,
         type=bool,
-        help='Flag to generate depth and semantic ground truth.')
+        help='Flag to generate depth, semantic and gps ground truth.')
     argparser.add_argument(
         '-l', '--logfile',
         metavar='F',
@@ -406,6 +566,17 @@ def main():
 	default=1,
 	help='Maximum number of threads that can be used to render images (default: 1)')
     args = argparser.parse_args()
+
+    #Check args.
+    if os.path.isfile(args.logfile) == False:
+        print(".log file specified does not exist. Please check the path.")
+        return
+    if os.path.isfile(args.sensors) == False:
+        print("Sensor file specified does not exist. Please check the path.")
+        return
+    if os.path.isfile(args.weather_parameters) == False:
+        print("Weather .csv file specified does not exist. Please check the path.")
+        return
 
     #Create the Carla client.
     #os.system(". /vol/teaching/drive_weather/run_carla")
@@ -421,6 +592,7 @@ def main():
 
     #Run all conditions - Semantic, Depth, Weather Conditions
     if bool(args.truth):
+        runGPS(args.logfile, logFileName, logFrames, args.dir, client)
         runCondition('Semantic', dfltWthr, False, args.logfile, logFileName, logFrames, args.sensors, args.dir, 'seg', args.max_threads, client)
         runCondition('Depth', dfltWthr, False, args.logfile, logFileName, logFrames, args.sensors, args.dir, 'depth', args.max_threads, client)
 
