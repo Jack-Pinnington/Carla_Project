@@ -1,1 +1,0 @@
-python3 captureData.py --logfile <logfile> --weather_parameters weather.csv --dir output --sensors test.cam
