@@ -149,16 +149,16 @@ def runGPS(logFile, logFileName, logFrames, outputDir, client):
     gpsSensor = GnssSensor(egoVehicle)
     imuSensor = IMUSensor(egoVehicle)
 
-    #Wait 42 frames for vehicles to spawn - this is just the behaviour of the .log file.
-    for i in range(0, 21):
+    #20 ticks to skip spawn animation - in sync with the rgb runCondition.
+    for i in range(0, 20):
         client.get_world().tick()
 
     #Sleep here is required to prevent buffering problem - buffer will read from previous step rather than current.
-    time.sleep(1)
+    time.sleep(2)
 
     #Start saving data.
     #Wait for the running log to finish
-    for frameNumber in range (0,1):#(0,int(nFrames/2)-40):
+    for frameNumber in range (0,int(logFrames/2)-40):
         client.get_world().tick()
         saveGPStoFile(imuSensor.data(), gpsSensor.data(), frameNumber, dirPrefix)
         #imageSaver(sensorList, frameNumber, int(threadNumber))
@@ -274,12 +274,11 @@ def rgbSaver(sensorList, frameNumber, maxThreads):
     numSensors = len(sensorList)
     numFullThreads = int(numSensors / maxThreads)
     threadRemainder = numSensors % maxThreads
-    #Start full threads
     sensorCounter = 0
     if numFullThreads > 0:
         for j in range(0, numFullThreads):
+            threads = list()
             for i in range(0, maxThreads):
-                threads = list()
                 thread = threading.Thread(target = sensorList[sensorCounter].saveImage, args=(frameNumber,))
                 threads.append(thread)
                 sensorCounter = sensorCounter + 1
@@ -287,8 +286,8 @@ def rgbSaver(sensorList, frameNumber, maxThreads):
             for thread in threads:
                 thread.join()
     if threadRemainder > 0:
+        threads = list()
         for i in range(0, threadRemainder):
-            threads = list()
             thread = threading.Thread(target = sensorList[sensorCounter].saveImage, args=(frameNumber,))
             threads.append(thread)
             sensorCounter = sensorCounter + 1
@@ -315,9 +314,12 @@ def runCondition(condName, condWeather, condLights, logFile, logFileName, logFra
 
     for i in range(0,5):
         client.get_world().tick()
+        time.sleep(0.1)
 
     #Replay the log file
     client.replay_file(logFile, 0, 0, 0)
+
+    #time.sleep(5)
     client.get_world().tick()
     actorList = client.get_world().get_actors()
 
@@ -333,6 +335,8 @@ def runCondition(condName, condWeather, condLights, logFile, logFileName, logFra
         return
     sensorList = rgbSensorCreator(sensorFile, egoVehicle, client, sensorDir, dirprefix, sensorType)
 
+    client.get_world().tick()
+
     #Set the weather and manage the headlights.
     if sensorType == 'rgb':
         client.get_world().set_weather(condWeather)
@@ -345,33 +349,34 @@ def runCondition(condName, condWeather, condLights, logFile, logFileName, logFra
         for vehicle in vehicleList:
             vehicle.set_light_state(carla.VehicleLightState(lightState))
 
-    #weather = client.get_world().get_weather()
-    #weather.precipitation = 100
-    #client.get_world().set_weather(weather)
-
-    #Wait 42 frames for vehicles to spawn - this is just the behaviour of the .log file.
-    for i in range(0, 21):
+    #Wait 20 frames for vehicles to spawn to skip spawn animation.
+    for i in range(0, 20):
         client.get_world().tick()
+        time.sleep(0.1)
     
     #Sleep here is required to prevent buffering problem - buffer will read from previous step rather than current.
-    time.sleep(1)
+    time.sleep(2)
 
     #Start saving data.
     for sensor in sensorList:
         sensor.listen() 
-    #Wait for the running log to finish
-    for frameNumber in range (0,1):#(0,int(nFrames/2)-40):
+
+    #Wait for the running log to finish, skipping delete animation.
+    for frameNumber in range (0,int(logFrames/2)-40):
         client.get_world().tick()
         rgbSaver(sensorList, frameNumber, int(threadNumber))
 
-    #Destroy the cameras - required since the car they are attached to is deleted on replay.
-    #World should be asynchronous again - speed increase since no more data is collected.
+    #World should be asynchronous again - server timeout if no tick received in synchronous mode.
     settings = client.get_world().get_settings()
     settings.synchronous_mode = False
     settings.fixed_delta_seconds = 0
     client.get_world().apply_settings(settings)
+
     for sensor in sensorList:
         sensor.destroy()
+
+    #Reload world so any static objects moved are returned.
+    client.reload_world()
 
 ###########################################################
 #
@@ -498,6 +503,11 @@ def getLogName(logFile):
     logFileName = filename.split(".")[0]
     return logFileName
 
+def getLogMap(logFile, client):
+    logFileInfo = client.show_recorder_file_info(logFile, False).split("\n")
+    MapString = logFileInfo[1].split(" ")
+    return MapString[1]
+
 ###########################################################
 #
 # Batch destroy actors - taken from generateFreeDrivingLog.py
@@ -555,7 +565,7 @@ def main():
     argparser.add_argument(
         '--truth',
 	default=0,
-        type=bool,
+        type=int,
         help='Flag to generate depth, semantic and gps ground truth.')
     argparser.add_argument(
         '-l', '--logfile',
@@ -563,7 +573,7 @@ def main():
         help='Logfile containing the scenario to be replayed')
     argparser.add_argument(
 	'-t', '--max_threads',
-	default=1,
+	default=3,
 	help='Maximum number of threads that can be used to render images (default: 1)')
     args = argparser.parse_args()
 
@@ -586,29 +596,26 @@ def main():
     #Get recorder file info.
     logFileName = getLogName(args.logfile)
     logFrames = getLogFrames(args.logfile, client)
-
-    print("Begin processing at %s" % datetime.datetime.now())
+    logMap = getLogMap(args.logfile, client)
+    #Load world to prevent sync issue on first condition.
+    client.load_world(logMap)
+    
+    print("----------------")
+    print("BEGIN LOGFILE %s, SENSORFILE %s at %s" % (args.logfile,args.sensors, datetime.datetime.now()))
+    print("----------------")
     dfltWthr = client.get_world().get_weather()
 
-    #Run all conditions - Semantic, Depth, Weather Conditions
+    #Run truth conditions - GPS, Semantic and Depth
     if bool(args.truth):
         runGPS(args.logfile, logFileName, logFrames, args.dir, client)
         runCondition('Semantic', dfltWthr, False, args.logfile, logFileName, logFrames, args.sensors, args.dir, 'seg', args.max_threads, client)
         runCondition('Depth', dfltWthr, False, args.logfile, logFileName, logFrames, args.sensors, args.dir, 'depth', args.max_threads, client)
+        print("Completed Truth at %s" % datetime.datetime.now())
 
     weatherConditionList = weatherListConstructor(args.weather_parameters)
     for weather in weatherConditionList:
         runCondition(weather.getName(), weather.getWeather(), weather.getHeadlights(), args.logfile, logFileName, logFrames, args.sensors, args.dir, 'rgb', args.max_threads, client)
-
-    #Remove all actors.
-    idList = []
-    actorList = client.get_world().get_actors()
-    for vehicle in actorList.filter('vehicle.*'):
-        idList.append(vehicle.id)
-    for walker in actorList.filter('walker.*'):
-        idList.append(walker.id)
-
-    batchDestroy(client, idList, 10)
+        print("Condition: %s completed at time %s." % (weather.getName(), datetime.datetime.now()))
 
     print("End processing at %s" % datetime.datetime.now())
 
@@ -618,5 +625,3 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         pass
-    finally:
-        print('\nDone!')
