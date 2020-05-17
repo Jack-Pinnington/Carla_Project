@@ -1,0 +1,12 @@
+#Name,Clouds,Precipitation,Precipitation Deposits,Wind,Fog Density,Fog Distance,Wetness,Sun Azimuth Angle,Sun Altitude Angle, Headlights
+Light_Snow_Midday,25,25,50,20,0,25,30,0,75,0
+Light_Snow_Night,25,25,50,20,0,25,30,0,-75,1
+Light_Snow_Sunset,25,25,50,20,0,25,30,0,10,1
+#,,,,,,,,,,
+Heavy_Snow_Midday,80,80,70,60,0,25,30,0,75,0
+Heavy_Snow_Night,80,80,70,60,0,25,30,0,-75,1
+Heavy_Snow_Sunset,80,80,70,60,0,25,30,0,10,1
+#,,,,,,,,,,
+Snow_Deposits_Midday,10,0,85,15,0,25,30,0,75,0
+Snow_Deposits_Night,10,0,85,15,0,25,30,0,-75,1
+Snow_Deposits_Sunset,10,0,85,15,0,25,30,0,10,1
