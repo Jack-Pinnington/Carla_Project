@@ -1,8 +1,3 @@
-import glob
-import os
-import sys
-import argparse
-
 try:
     sys.path.append(glob.glob('../carla/dist/carla-*%d.%d-%s.egg' % (
         sys.version_info.major,
@@ -11,8 +6,11 @@ try:
 except IndexError:
     pass
 
-import carla
+import glob
+import os
+import sys
 import argparse
+import carla
 import logging
 import random
 import time
@@ -49,16 +47,22 @@ def makeNightBlueprints(bpl):
 
 def spawnCar(spawnPoint):
     vehicle_bp = random.choice(carBlueprints)
+    color = random.choice(vehicle_bp.get_attribute('color').recommended_values)
+    vehicle_bp.set_attribute('color', color)
     command = SpawnActor(vehicle_bp, spawnPoint).then(SetAutopilot(FutureActor, True))
     return command
 
 def spawnMotorbike(spawnPoint):
     vehicle_bp = random.choice(motorbikeBlueprints)
+    color = random.choice(vehicle_bp.get_attribute('color').recommended_values)
+    vehicle_bp.set_attribute('color', color)
     command = SpawnActor(vehicle_bp, spawnPoint).then(SetAutopilot(FutureActor, True))
     return command
 
 def spawnBike(spawnPoint):
     vehicle_bp = random.choice(bicycleBlueprints)
+    color = random.choice(vehicle_bp.get_attribute('color').recommended_values)
+    vehicle_bp.set_attribute('color', color)
     command = SpawnActor(vehicle_bp, spawnPoint).then(SetAutopilot(FutureActor, True))
     return command
 
@@ -119,19 +123,19 @@ def main():
     argparser.add_argument(
 	'--numWalkers',
 	default = 60,
-        type=float)
+        type=int)
     argparser.add_argument(
 	'--numCars',
 	default = 90,
-        type=float)
+        type=int)
     argparser.add_argument(
 	'--numMotorbikes',
 	default = 15,
-        type=float)
+        type=int)
     argparser.add_argument(
 	'--numBicycles',
 	default = 15,
-        type=float)
+        type=int)
     args = argparser.parse_args()
     client = carla.Client(args.host, args.port)
     client.set_timeout(1000)
@@ -149,6 +153,10 @@ def main():
     print('Number of available spawn points = %i' % num_points)
     #Shuffle spawn points so everything is randomized - stops there being clumps of vehicles.
     random.shuffle(spawn_points)
+
+    #settings = world.get_settings()
+    #settings.fixed_delta_seconds = 0.10
+    #world.apply_settings(settings)
 
     batch = []
 
@@ -179,11 +187,11 @@ def main():
     vehiclesToSpawn.append(SpawnActor(hero_bp, hero_transform).then(SetAutopilot(FutureActor, True)))
 
     #Spawn other vehicles
-    carFinish = args.numCars + 1
+    carFinish = int(args.numCars + 1)
     motorbikeStart = carFinish
-    motorbikeFinish = motorbikeStart + args.numMotorbikes
+    motorbikeFinish = int(motorbikeStart + args.numMotorbikes)
     bicycleStart = motorbikeFinish
-    bicycleFinish = bicycleStart + args.numBicycles
+    bicycleFinish = int(bicycleStart + args.numBicycles)
 
     for i in range(1, carFinish):
         vehiclesToSpawn.append(spawnCar(spawn_points[i]))
@@ -241,7 +249,6 @@ def main():
     #Batch Spawn Walkers
     spawnedWalkerList = []
     walkerSpawnedSpeed = []
-    print('Spawning Walkers!')
     responseNumber = 0
     for response in batchSpawn(client, walkersToSpawn, 10):
         if not(response.error):
@@ -298,14 +305,14 @@ def main():
 
     print('Output log saved to:  %s' % args.recorderFile)
 
-    print('Deleting Vehicles!')
     batchDestroy(client, spawnedVehicleIDs, 10)
 
     #Delete the walker actors!
-    print('Deleting Walkers + Controllers!')
     for i in range(0, len(controllerList)):
         controllerList[i].stop()
     batchDestroy(client, walkerIDList, 10)
+
+    print('Deleted all vehicles + pedestrians.')
 
 if __name__ == '__main__':
 
